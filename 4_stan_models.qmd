@@ -1,0 +1,518 @@
+---
+editor: visual
+execute:
+  warning: false
+---
+
+# Stan Models
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(gt)
+library(cmdstanr)
+library(tidybayes)
+#library(posterior)
+library(ggpmisc)
+library(ggridges)
+library(loo)
+
+# Set ggplot theme
+theme_set(theme_classic())
+
+# Create a function to convert decimals to percentages
+to_percent <- function(x, digits = 0){
+  return(round(x * 100, digits = digits))
+}
+```
+
+Now that we've established theoretical models and simulated realistic data from them, we can use [Stan](https://mc-stan.org/docs/) to fit these models to data. For now, we'll stick to our simulated data and see if our posterior estimates can recover the true value of the parameters.
+
+```{r}
+grades <- read_csv(file = "data/sim_grades.csv") |>
+  transmute(
+    student = row_number(),
+    y8 = round(y8, 2),
+    y9 = round(y9, 2),
+    y10 = round(y10, 2)) |>
+  # Remove zeros or ones for the Beta distribution and Stan
+  mutate(
+    across(
+      starts_with("y"), ~ case_when(
+        .x == 0 ~ 0.001,
+        .x == 1 ~ 0.999,
+        TRUE ~ .x
+      )))
+```
+
+## Linear Link
+
+Let's start by building in Stan our linear model from @sec-lin-dag-b.
+
+$$x_{8i} \sim \text{Beta}(0.8 \cdot \phi, \, (1 - 0.8) \cdot \phi))$$
+
+$$\mu_{9i} = \alpha_9 + \beta_1 \cdot (x_{8i} - \bar{x}_8)$$
+
+$$x_{9i} \sim \text{Beta}(\mu_{9i} \cdot \phi_9,\ (1 - \mu_{9i}) \cdot \phi_9)$$
+
+$$\mu_{10i} = \alpha_{10} + \beta_2 \cdot (x_{8i} - \bar{x}_8) + \beta_3 \cdot (x_{9i} - \bar{x}_9)$$
+First, we need to create a data list to feed to our Stan model.
+Second, let's compile our Stan model.Next, let's fit and [save our model](https://mc-stan.org/cmdstanr/articles/cmdstanr.html#saving-fitted-model-objects) so we don't have to recompile it and sample from it each time we reader our Quarto document.
+```{r}
+#| eval: FALSE
+
+data_list <- list(
+  N = nrow(grades),
+  x8 = grades$y8,
+  x9 = grades$y9,
+  y10 = grades$y10
+)
+
+# Compile the Stan Model
+lin_mod <- cmdstan_model(stan_file = 'stan_models/linear_model.stan')
+
+# Fit the model
+fit_lin_mod <- lin_mod$sample(
+  dat = data_list,
+  seed = 2025
+  )
+
+fit_lin_mod$cmdstan_diagnose()
+
+# Save the Stan model
+fit_lin_mod$save_object(file = "stan_models/fit_lin_mod.RDS")
+
+rm("lin_mod", "fit_lin_mod")
+```
+
+```{r}
+# Load the Stan model
+fit_lin_mod <- readRDS("stan_models/fit_lin_mod.RDS")
+```
+
+
+```{r}
+fit_lin_mod$diagnostic_summary()
+
+fit_lin_mod$sampler_diagnostics(format = "df")
+```
+
+```{r}
+fit_lin_mod$summary(
+  variables = c(
+    "mu8", "alpha9", "alpha10",
+    "phi8", "phi9", "phi10",
+    "beta1", "beta2", "beta3",
+    "direct_effect", "indirect_effect", "total_effect"),
+  MEAN = mean, 
+  "median",
+  ~quantile(.x, probs = c(0.1, 0.9)),
+  Minimum = function(x) min(x)
+  )
+```
+
+```{r}
+#| label: tbl-sum-stan-lin
+#| tbl-cap: "Summary Statistics of Posterior Parameters"
+
+fit_lin_mod$summary(
+  variables = c(
+    "mu8", "alpha9", "alpha10",
+    "phi8", "phi9", "phi10",
+    "beta1", "beta2", "beta3",
+    "direct_effect", "indirect_effect", "total_effect")
+  ) |>
+  gt() |>
+  fmt_number(columns = where(is.numeric), decimals = 2)
+```
+
+Note that all model estimates are sensible and close to the true parameter values.
+
+We can use the `spread_draws()` function from the [tidybayes package](https://mjskay.github.io/tidybayes/) to easily manipulate our posterior samples and visualize the results. Since the typical math class hovers around 25, let's randomly select 25 students from the 250 students and visualize the results.
+
+```{r}
+posterior_long <- fit_lin_mod |>
+  spread_draws(y10_hat[student]) |>
+  inner_join(grades, by = join_by(student))
+
+grades_pred_summary <- posterior_long |>
+  group_by(student) |>
+  summarise(
+    n = n(),
+    y8 = first(y8),
+    y9 = first(y9),
+    y10 = first(y10),
+    y10_hat_mean = mean(y10_hat),
+    y10_hat_median = median(y10_hat),
+    residuals = y10 - y10_hat_median,
+    y10_hat_sd = sd(y10_hat),
+    lower_95 = quantile(y10_hat, 0.025),
+    upper_95 = quantile(y10_hat, 0.975),
+    p_fail = mean(y10_hat < 0.5),
+    p_1 = mean(y10_hat >= 0.5 & y10_hat < 0.6),
+    p_2 = mean(y10_hat >= 0.6 & y10_hat < 0.7),
+    p_3 = mean(y10_hat >= 0.7 & y10_hat < 0.8),
+    p_4 = mean(y10_hat >= 0.8),
+    p_1_om = mean(y10_hat >= 0.5),
+    p_2_om = mean(y10_hat >= 0.6),
+    p_3_om = mean(y10_hat >= 0.7),
+    p_4_om = mean(y10_hat >= 0.8),
+    p_pass = mean(y10_hat >= 0.5)
+  )
+
+posterior_long <- posterior_long |>
+  inner_join(grades_pred_summary, by = join_by(student, y8, y9, y10))
+
+# Randomly select 25 student IDs
+set.seed(2025)
+random_25_students <- grades_pred_summary |>
+  slice_sample(n = 25) |>
+  pull(student)
+```
+
+Now let's explore a few ways to visualize the results for our class.
+
+```{r, fig.height=10, fig.width=8}
+#| label: fig-pointinterval
+#| fig-cap: "stat_pointinterval()"
+
+posterior_long |>
+  filter(student %in% random_25_students) |>
+  ggplot(aes(x = y10_hat, y = fct_reorder(factor(student), y10_hat_mean))) +
+  stat_pointinterval(
+    .width = c(0.66, 0.90),
+    point_interval = median_qi,
+    alpha = 0.6,
+    color = "black"
+  ) +
+  stat_pointinterval(
+    .width = c(0.66, 0.90),
+    point_interval = median_hdi,
+    color = "darkorange",
+    alpha = 0.6,
+    position = position_nudge(y = 0.15)
+  ) +
+  stat_pointinterval(
+    .width = c(0.66, 0.90),
+    point_interval = mean_hdi,
+    color = "forestgreen",
+    alpha = 0.6,
+    position = position_nudge(y = 0.3)
+  ) +
+  geom_point(aes(x = y10), color = "red", size = 2, position = position_nudge(y = 0.15)) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1), labels = scales::percent) +
+  labs(
+    x = "Posterior Predicted Year 10 Result",
+    y = "Student",
+    title = "Posterior Predictive Distributions for 25 Random Students",
+    subtitle = "Black = median_qi; Orange = median_hdi; Green = mean_hdi; Red = true observed"
+  )
+```
+
+The `stat_pointinterval()` is great for a quick visual summary of the posterior distributions. There are many ways to create [credible intervals](https://youtu.be/yEO-oEsUh0w?si=xDhWzS83C7OvpS73) to summarize a distribution.
+
+The black thicker line represents the 66% quantile interval (QI) while the thinner black line represents the 90% QI. The black dot is the median of our posterior samples. The red dot is the actual grade the student obtained in year 10. We can interpret these quantile intervals as follows: Given the data and the model (including priors), there's a 66% (or 90%) probability that the student's true grade lies within this interval. The 90% quantile interval could be obtained manually using `quantile(y10_hat, c(0.05, 0.95)`. Note that `quantile(y10_hat, c(0.04, 0.94)` is also a 90% interval. The highest-density interval (HDI) is the **shortest** possible quantile interval that contains 90% of the density.
+
+The orange lines are the 66% and 90% high-density intervals (HDI) for the median. The green lines are the same HDI but the mean is plotted instead of the median. We see that there are little differences between the three intervals in the middle of the scale because the posterior distribution is symmetric. The goal of education is to ensure that students understand the curriculum so we can expect ceiling effects to be present. As a result, we'll use the median HDI in the visualizations below.
+
+One of the main advantages of Bayesian statistics is that we produce posterior distributions for our estimates instead of creating point estimates and confidence intervals with the Frequentist approach. Hence, the best way to communicate our results is to plot the entire distribution. We can do so using the `stat_halfeye()` function.
+
+```{r, fig.height=10, fig.width=8}
+#| label: fig-halfeye
+#| fig-cap: "stat_halfeye()"
+
+posterior_long |>
+  filter(student %in% random_25_students) |>
+  ggplot(aes(x = y10_hat, y = fct_reorder(factor(student), y10_hat_mean))) +
+  stat_halfeye(.width = c(0.66, 0.90), point_interval = median_hdi) +
+  geom_point(aes(x = y10), color = "red", size = 2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Posterior Predicted Year 10 Result",
+    y = "Student",
+    title = "Posterior Predictive Distributions for 25 Random Students",
+    subtitle = "66% and 90% median HDI ; Red points = true observed values"
+  )
+```
+
+We can add some colors to better communicate the risk profile of students.
+
+```{r, fig.height=10, fig.width=8}
+#| label: fig-ridges
+#| fig-cap: "geom_density_ridges_gradient()"
+
+
+# https://cran.r-project.org/web/packages/ggridges/vignettes/introduction.html
+
+posterior_long |>
+  filter(student %in% random_25_students) |>
+  ggplot(aes(x = y10_hat, y = fct_reorder(factor(student), y10_hat_mean))) +
+  geom_density_ridges_gradient(
+    aes(height = ..density.., fill = ..x..),
+    stat = "density",
+    scale = 0.95,
+    rel_min_height = 0.01
+  ) +
+  stat_pointinterval(.width = c(0.66, 0.90), point_interval = median_hdi) +
+  geom_point(aes(x = y10), color = "blue", size = 2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(
+    breaks = seq(0, 1, 0.1), limits = c(0, 1),
+    labels = scales::percent
+  ) +
+  scale_fill_gradientn(
+    colours = c("red", "red", "yellow", "lightgreen", "forestgreen"),
+    values = c(0, 0.45, 0.6, 0.8, 1),
+    limits = c(0, 1),
+    guide = "none"
+  ) +
+  labs(
+    x = "Posterior Predicted Year 10 Result",
+    y = "Student",
+    title = "Posterior Predictive Distributions for 25 Random Students",
+    subtitle = "66% and 90% median HDI ; Blue point = true observed value"
+  ) +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90"),
+    panel.grid.major.y = element_blank(),
+  )
+
+#ggsave("posterior_plot.png", width = 8, height = 10)  # height in inches
+```
+
+Notice that we can easily calculate all kinds of probabilities based on [Ontario's achievement levels](https://www.edu.gov.on.ca/eng/policyfunding/growsuccess.pdf#page=46).
+
+```{r}
+#| label: tbl-p-fail
+#| tbl-cap: "Probabilities based on the posterior distributions"
+
+grades_pred_summary |>
+  filter(student %in% random_25_students) |>
+  gt() |>
+  fmt_number(columns = where(is.numeric), decimals = 2)
+```
+
+We see that student 154 has a mean prediction of `r to_percent(grades_pred_summary |> filter(student == 154) |> pull(y10_hat_mean))`%. Although student 154 is predicted to finish Year 10 with a level 2, we still estimate that they have a `r to_percent(grades_pred_summary |> filter(student == 154) |> pull(p_fail))`% chance of failing the course. They also have a `r to_percent(grades_pred_summary |> filter(student == 154) |> pull(p_3_om))`% chance of finishing with a 3 or more. Plotting the entire distribution like in @fig-ridges along with useful metrics found in @tbl-p-fail provide a much more informative and honest depiction of how we expect a student to perform in Year 10.
+
+```{r}
+grades_pred_summary |>
+  ggplot(aes(x = y10_hat_median, y = y10)) +
+  geom_point(shape = 1, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = c(-0.2, 0, 0.2), linetype = "dashed") +
+  geom_smooth(method = "lm", formula = 'y ~ x') +
+  stat_poly_eq(
+    formula = y ~ x,
+    aes(label = after_stat(eq.label))
+    ) +
+  scale_x_continuous(
+    limits = c(0, 1), breaks = seq(0, 1, 0.1),
+    labels = scales::percent) +
+  scale_y_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Median of Posterior Predicted Grades",
+    y = "Actual Grade in Year 10"
+  )
+```
+
+```{r}
+
+grades_pred_summary |>
+  ggplot(aes(x = residuals)) +
+  geom_histogram() +
+  geom_vline(xintercept = c(-0.2, 0.2), linetype = "dashed") +
+  scale_x_continuous(breaks = seq(-1, 1, 0.1), labels = scales::percent)
+```
+
+We see that the true grade is within +- 20% roughly `r to_percent(mean(abs(grades_pred_summary$residuals) < 0.2))`% of the time.
+
+## Logit Link
+
+Le $$x_{8i} \sim \text{Beta}(\mu_8 \cdot \phi, \, (1 - \mu_8) \cdot \phi))$$
+
+$$\text{logit}(\mu_{9i}) = \alpha_9 + \beta_1 \cdot (x_{8i} - \bar{x}_8)$$
+
+$$x_{9i} \sim \text{Beta}(\mu_{9i} \cdot \phi_9,\ (1 - \mu_{9i}) \cdot \phi_9)$$
+
+$$\text{logit}(\mu_{10i}) = \alpha_{10} + \beta_2 \cdot (x_{8i} - \bar{x}_8) + \beta_3 \cdot (x_{9i} - \bar{x}_9)$$
+
+$$y_{10i} \sim \text{Beta}(\mu_{10i} \cdot \phi_{10},\ (1 - \mu_{10i}) \cdot \phi_{10})$$
+```{r}
+#| eval: FALSE
+
+# Compile the Stan Model
+logit_mod <- cmdstan_model(stan_file = 'stan_models/logit_model.stan')
+
+# Fit the model
+fit_logit_mod <- logit_mod$sample(
+  dat = data_list,
+  seed = 2025
+  )
+
+# Save the Stan model
+fit_logit_mod$save_object(file = "stan_models/fit_logit_mod.RDS")
+
+fit_logit_mod$cmdstan_diagnose()
+
+rm("logit_mod", "fit_logit_mod")
+```
+
+```{r}
+# Load the Stan model
+fit_logit_mod <- readRDS("stan_models/fit_logit_mod.RDS")
+```
+
+```{r}
+fit_lin_mod$diagnostic_summary()
+
+fit_lin_mod$sampler_diagnostics(format = "df")
+```
+
+Note that we can save our model with the `saveRDS()` function to avoid the computationally intensive process of fitting the model each time we render our quarto file.
+
+```{r}
+#| label: tbl-sum-stan-logit
+#| tbl-cap: "Summary Statistics of Posterior Parameters"
+
+fit_logit_mod$summary(
+  variables = c(
+    "mu8", "alpha9", "alpha10",
+    "phi8", "phi9", "phi10",
+    "beta1", "beta2", "beta3")
+  ) |>
+  gt() |>
+  fmt_number(columns = where(is.numeric), decimals = 2)
+```
+
+```{r}
+post_long_logit <- fit_logit_mod |>
+  spread_draws(y10_hat[student]) |>
+  inner_join(grades, by = join_by(student))
+
+grades_pred_summary_logit <- post_long_logit |>
+  group_by(student) |>
+  summarise(
+    n = n(),
+    y8 = first(y8),
+    y9 = first(y9),
+    y10 = first(y10),
+    y10_hat_mean = mean(y10_hat),
+    y10_hat_median = median(y10_hat),
+    residuals = y10 - y10_hat_median,
+    y10_hat_sd = sd(y10_hat),
+    lower_95 = quantile(y10_hat, 0.025),
+    upper_95 = quantile(y10_hat, 0.975),
+    p_fail = mean(y10_hat < 0.5),
+    p_1 = mean(y10_hat >= 0.5 & y10_hat < 0.6),
+    p_2 = mean(y10_hat >= 0.6 & y10_hat < 0.7),
+    p_3 = mean(y10_hat >= 0.7 & y10_hat < 0.8),
+    p_4 = mean(y10_hat >= 0.8),
+    p_1_om = mean(y10_hat >= 0.5),
+    p_2_om = mean(y10_hat >= 0.6),
+    p_3_om = mean(y10_hat >= 0.7),
+    p_4_om = mean(y10_hat >= 0.8),
+    p_pass = mean(y10_hat >= 0.5)
+  )
+
+post_long_logit <- post_long_logit |>
+  inner_join(grades_pred_summary_logit, by = join_by(student, y8, y9, y10))
+
+# Randomly select 25 student IDs
+set.seed(2025)
+random_25_students <- grades_pred_summary_logit |>
+  slice_sample(n = 25) |>
+  pull(student)
+```
+
+```{r, fig.height=10, fig.width=8}
+#| label: fig-ridges-logit
+#| fig-cap: "geom_density_ridges_gradient()"
+
+post_long_logit |>
+  filter(student %in% random_25_students) |>
+  ggplot(aes(x = y10_hat, y = fct_reorder(factor(student), y10_hat_mean))) +
+  geom_density_ridges_gradient(
+    aes(height = ..density.., fill = ..x..),
+    stat = "density",
+    scale = 0.95,
+    rel_min_height = 0.01
+  ) +
+  stat_pointinterval(.width = c(0.66, 0.90), point_interval = median_hdi) +
+  geom_point(aes(x = y10), color = "blue", size = 2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(
+    breaks = seq(0, 1, 0.1), limits = c(0, 1),
+    labels = scales::percent
+  ) +
+  scale_fill_gradientn(
+    colours = c("red", "red", "yellow", "lightgreen", "forestgreen"),
+    values = c(0, 0.45, 0.6, 0.8, 1),
+    limits = c(0, 1),
+    guide = "none"
+  ) +
+  labs(
+    x = "Posterior Predicted Year 10 Result",
+    y = "Student",
+    title = "Posterior Predictive Distributions for 25 Random Students",
+    subtitle = "66% and 90% median HDI ; Blue point = true observed value"
+  ) +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90"),
+    panel.grid.major.y = element_blank(),
+  )
+
+#ggsave("posterior_plot_logit.png", width = 8, height = 10)  # height in inches
+```
+
+Only 53 and 29 switched rankings.
+
+```{r}
+grades_pred_summary_logit |>
+  ggplot(aes(x = y10_hat_median, y = y10)) +
+  geom_point(shape = 1, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = c(-0.2, 0, 0.2), linetype = "dashed") +
+  geom_smooth(method = "lm", formula = 'y ~ x') +
+  stat_poly_eq(
+    formula = y ~ x,
+    aes(label = after_stat(eq.label))
+    ) +
+  scale_x_continuous(
+    limits = c(0, 1), breaks = seq(0, 1, 0.1),
+    labels = scales::percent) +
+  scale_y_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Median of Posterior Predicted Grades",
+    y = "Actual Grade in Year 10"
+  )
+```
+
+```{r}
+grades_pred_summary_logit |>
+  ggplot(aes(x = residuals)) +
+  geom_histogram() +
+  geom_vline(xintercept = c(-0.2, 0.2), linetype = "dashed") +
+  scale_x_continuous(breaks = seq(-1, 1, 0.1), labels = scales::percent)
+```
+
+We see that the true grade is within +- 20% roughly `r to_percent(mean(abs(grades_pred_summary_logit$residuals) < 0.2))`% of the time.
+
+## Model Comparisons
+
+```{r}
+fit_lin_mod$loo()
+
+fit_logit_mod$loo()
+
+loo_compare(x = list(
+  linear_model = fit_lin_mod$loo(),
+  logit_model = fit_logit_mod$loo()
+))
+
+```
+
+Based on LOO cross-validation, the logit model has slightly better predictive performance than the linear model, with an elpd difference of 4.4 (SE = 3.0).

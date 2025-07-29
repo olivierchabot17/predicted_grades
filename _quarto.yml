@@ -1,0 +1,37 @@
+project:
+  type: book
+
+book:
+  title: "Predicting Academic Achievement Using Past Performance"
+  author: "Olivier Chabot"
+  date: "2025-06-27"
+  chapters:
+    - index.qmd
+    - 1_intro.qmd
+    - 2_dags.qmd
+    - 3_sim_data.qmd
+    - 4_stan_models.qmd
+    - 5_hierarchical_model.qmd
+    - 6_missing_data.qmd
+
+bibliography: references.bib
+
+format:
+  html:
+    theme:
+      - cosmo
+      - brand
+    code-fold: true
+    fig-format: svg
+    fig-path: figures/
+
+  pdf:
+    documentclass: scrreprt
+    keep-tex: true
+    execute:
+      echo: false
+
+  epub:
+    execute:
+      echo: false     # Hide code chunks in EPUB
+    cover-image: cover.png  # Optional: replace or remove if no image

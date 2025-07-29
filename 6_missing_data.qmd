@@ -1,0 +1,239 @@
+---
+editor: visual
+execute:
+  warning: false
+---
+
+# Missing Data
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(cmdstanr)
+library(tidybayes)
+library(gt)
+library(ggridges)
+
+# Set ggplot theme
+theme_set(theme_classic())
+```
+
+Missing data can happen for many reasons in the educational context.
+
+* student moved from another country or province
+* student did not take a specific course as their are many streams available in high school
+* student skipped a grade
+* student had to stop attending school because of an injury but was given the credit
+* student took an online course
+
+The surface area for missing values to occur increases as the student progresses through the educational system. A student in year 12 has more prior information than a student in year 2. Given our aim of predicting achievement, it makes sense to account for missing values and use all information available to quantify our uncertainty.
+
+Let's start by loading our simulated data and artificially adding ```NA``` values with 5% probability.
+
+```{r}
+grades <- read_csv(file = "data/sim_grades_teacher.csv") |>
+  transmute(
+    student,
+    teacher_8, teacher_9, teacher_10,
+    teacher_8_id, teacher_9_id, teacher_10_id,
+    y8 = round(y8, 2),
+    y9 = round(y9, 2),
+    y10 = round(y10, 2)) |>
+  # Remove zeros or ones for the Beta distribution and Stan
+  mutate(
+    across(
+      starts_with("y"), ~ case_when(
+        .x == 0 ~ 0.001,
+        .x == 1 ~ 0.999,
+        TRUE ~ .x
+      )))
+
+na_prob <- 0.05
+
+set.seed(2025)
+grades <- grades |>
+  mutate(
+    y8 = ifelse(runif(n()) < na_prob, NA, y8),
+    y9 = ifelse(runif(n()) < na_prob, NA, y9),
+    y10 = ifelse(runif(n()) < na_prob, NA, y10)
+  )
+
+grades |>
+  select(starts_with("y")) |>
+  summary()
+```
+We see that there are several missing values for each year. Keep in mind that the missing values were assigned completely at random which is likely not true in reality. Recent migration influences both missing values and achievement.
+
+## Teat Missing Values As Unknown Parameters
+
+```{r}
+data_list <- list(
+  N = nrow(grades),
+  J = length(unique(c(grades$teacher_8_id, grades$teacher_9_id, grades$teacher_10_id))),
+  
+  teacher_8 = grades$teacher_8_id,
+  teacher_9 = grades$teacher_9_id,
+  teacher_10 = grades$teacher_10_id,
+  
+  N_x8_obs = sum(!is.na(grades$y8)),
+  x8_idx_obs = which(!is.na(grades$y8)),
+  x8_obs = grades$y8[!is.na(grades$y8)],
+  
+  N_x9_obs = sum(!is.na(grades$y9)),
+  x9_idx_obs = which(!is.na(grades$y9)),
+  x9_obs = grades$y9[!is.na(grades$y9)],
+  
+  N_y10_obs = sum(!is.na(grades$y10)),
+  y10_idx_obs = which(!is.na(grades$y10)),
+  y10_obs = grades$y10[!is.na(grades$y10)]
+)
+
+```
+
+```{r}
+#| eval: FALSE
+
+# Compile the Stan Model
+missing_data_mod <- cmdstan_model(
+  stan_file = 'stan_models/missing_data_model.stan'
+  )
+
+# Fit the model
+fit_missing_data_mod <- missing_data_mod$sample(
+  dat = data_list,
+  seed = 2025
+  )
+
+# Save the Stan model
+fit_missing_data_mod$save_object(file = "stan_models/fit_missing_data_mod.RDS")
+
+fit_missing_data_mod$cmdstan_diagnose()
+
+rm("missing_data_mod", "fit_missing_data_mod")
+```
+
+```{r}
+# Load the Stan model
+fit_missing_data_mod <- readRDS("stan_models/fit_missing_data_mod.RDS")
+```
+
+```{r}
+fit_missing_data_mod$diagnostic_summary()
+
+fit_missing_data_mod$sampler_diagnostics(format = "df")
+```
+
+
+```{r}
+fit_missing_data_mod$summary(
+  variables = c(
+    "alpha8", "alpha9", "alpha10",
+    "phi8", "phi9", "phi10",
+    "beta1", "beta2", "beta3",
+    "zeta",
+    "tau_8", "tau_9", "tau_10")
+  ) |>
+  gt() |>
+  fmt_number(columns = where(is.numeric), decimals = 2)
+```
+
+
+```{r}
+post_long <- fit_missing_data_mod |>
+  spread_draws(y10_hat[student]) |>
+  inner_join(grades, by = join_by(student))
+
+grades_pred_summary <- post_long |>
+  group_by(student) |>
+  summarise(
+    n = n(),
+    y8 = first(y8),
+    y9 = first(y9),
+    y10 = first(y10),
+    y10_hat_mean = mean(y10_hat),
+    y10_hat_median = median(y10_hat),
+    residuals = y10 - y10_hat_median,
+    y10_hat_sd = sd(y10_hat),
+    lower_95 = quantile(y10_hat, 0.025),
+    upper_95 = quantile(y10_hat, 0.975),
+    p_fail = mean(y10_hat < 0.5),
+    p_1 = mean(y10_hat >= 0.5 & y10_hat < 0.6),
+    p_2 = mean(y10_hat >= 0.6 & y10_hat < 0.7),
+    p_3 = mean(y10_hat >= 0.7 & y10_hat < 0.8),
+    p_4 = mean(y10_hat >= 0.8),
+    p_1_om = mean(y10_hat >= 0.5),
+    p_2_om = mean(y10_hat >= 0.6),
+    p_3_om = mean(y10_hat >= 0.7),
+    p_4_om = mean(y10_hat >= 0.8),
+    p_pass = mean(y10_hat >= 0.5)
+  )
+
+post_long <- post_long |>
+  inner_join(grades_pred_summary, by = join_by(student, y8, y9, y10))
+
+# Randomly select 25 student IDs
+set.seed(2025)
+random_25_students <- grades_pred_summary |>
+  slice_sample(n = 25) |>
+  pull(student)
+
+grades |>
+  filter(student %in% random_25_students)  |>
+  filter(if_any(everything(), is.na))
+```
+
+```{r, fig.height=10, fig.width=8}
+#| label: fig-ridges-missing
+#| fig-cap: "geom_density_ridges_gradient()"
+
+post_long |>
+  filter(student %in% random_25_students) |>
+  ggplot(aes(x = y10_hat, y = fct_reorder(factor(student), y10_hat_mean))) +
+  geom_density_ridges_gradient(
+    aes(height = ..density.., fill = ..x..),
+    stat = "density",
+    scale = 0.95,
+    rel_min_height = 0.01
+  ) +
+  stat_pointinterval(.width = c(0.66, 0.90), point_interval = median_hdi) +
+  geom_point(aes(x = y10), color = "blue", size = 2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(
+    breaks = seq(0, 1, 0.1), limits = c(0, 1),
+    labels = scales::percent
+  ) +
+  scale_fill_gradientn(
+    colours = c("red", "red", "yellow", "lightgreen", "forestgreen"),
+    values = c(0, 0.45, 0.6, 0.8, 1),
+    limits = c(0, 1),
+    guide = "none"
+  ) +
+  labs(
+    x = "Posterior Predicted Year 10 Result",
+    y = "Student",
+    title = "Posterior Predictive Distributions for 25 Random Students",
+    subtitle = "66% and 90% median HDI ; Blue point = true observed value"
+  ) +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90"),
+    panel.grid.major.y = element_blank(),
+  )
+
+#ggsave("posterior_plot_teacher.png", width = 8, height = 10)
+```
+
+
+
+
+## Impute Data First
+
+Instead, as Gelman et al. (2013) recommended, we can handle missing data using a two-step process:
+
+Do multiple imputation using a specialized program
+Use brms or rstan (or other Bayesian methods) to analyze each imputed data set
+
+mice library
+
+https://psyc-bayes-notes.netlify.app/missing-data

@@ -1,0 +1,161 @@
+---
+editor: visual
+execute:
+  warning: false
+---
+
+# Introduction
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(gt)
+
+# Set ggplot theme
+theme_set(theme_classic())
+
+# Create a function to convert decimals to percentages
+to_percent <- function(x, digits = 2){
+  return(round(x * 100, digits = digits))
+}
+```
+
+Our goal is to use statistical modeling to predict the final grade of the incoming students in our class. If we can reliably and accurately predict the range of probable achievement, then we could adjust our teaching accordingly. The teacher could teach at a slower pace and review the foundational knowledge if they know many students in the class are likely to struggle. Conversely, the teacher can spend less time on the basics if their students are well prepared and try to go deeper by challenging them.
+
+```{r}
+#| label: fig-two-students
+#| fig-cap: "Fictitious Students' Final Grade Estimates"
+
+ggplot() +
+  geom_vline(
+    xintercept = c(0.5, 0.6, 0.7, 0.8),
+    linetype = "dashed", alpha = 0.5) +
+  stat_function(
+    fun = dbeta,
+    args = list(shape1 = 0.55 * 20, shape2 = (1-0.55)*20),
+    xlim = c(0, 1), color = "blue"
+  ) +
+  stat_function(
+    fun = dbeta,
+    args = list(shape1 = 0.85 * 10, shape2 = (1-0.85)*10),
+    xlim = c(0, 1), color = "darkorange"
+  ) +
+  geom_label(
+    aes(
+      x=c(0.25,0.55,0.65,0.75,0.90), y = 3.75,
+      label = c("R", "1", "2", "3", "4"))) +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Predicted Final Grade",
+    y = "Probability Density"
+  )
+```
+
+```{r}
+set.seed(2025)
+
+two_student_samples <- tibble(
+  blue = rbeta(n = 10000, shape1 = 0.55 * 20, shape2 = (1-0.55)*20),
+  orange = rbeta(n = 10000, shape1 = 0.85 * 10, shape2 = (1-0.85)*10)
+)
+```
+
+As we can see in @fig-two-students, our predictions are not point estimates and are instead, statistical distributions that represent uncertainty. We can always obtain points estimates like the mean, mode, and median from the distribution, but the reverse is not true. If we only predict the final grade as a number, we cannot obtain the the distribution that also quantifies the uncertainty around our prediction.
+
+```{r}
+#| label: tbl-sum-stats
+#| tbl-cap: "Summary Statistics"
+
+estimate_mode <- function(x) {
+  d <- density(x)
+  d$x[which.max(d$y)]
+}
+
+two_student_samples |>
+  pivot_longer(cols = everything(), names_to = "student", values_to = "grade") |>
+  group_by(student) |>
+  summarise(
+    mean = mean(grade),
+    median = median(grade),
+    mode = estimate_mode(grade),
+    standard_deviation = sd(grade)
+  ) |>
+  ungroup()  |>
+  gt() |>
+  fmt_number(columns = where(is.numeric), decimals = 2) |>
+  cols_label(
+    student = "Student",
+    mean = "Mean",
+    median = "Median",
+    mode = "Mode",
+    standard_deviation = "Standard Deviation"
+  )
+```
+
+When the distribution is symmetric, the mean, median and mode are similar. However, as seen in @tbl-sum-stats, the orange student's points estimates differ significantly. Which number best describes this students achievement profile? This is a fundamental limitation of point estimates and why thinking in terms of probability distributions is more useful. Generally speaking, the median is more representative than the mean for skewed distributions.
+
+```{r}
+p <- two_student_samples |>
+  mutate(orange_greater_blue = ifelse(orange > blue, TRUE, FALSE)) |>
+  pull(orange_greater_blue) |>
+  mean()
+```
+
+We see that the orange student above is **likely** to perform better that the blue student. In fact, we can use samples from these distributions to easily compute the probability the orange students has a greater final grade than the blue student. There's a `r to_percent(p, digits = 0)`% chance that the orange student finishes with a higher grade.
+
+Furthermore, we can estimate the probabilities that each student falls within a certain grade level range.[^1_intro-1] We see in @tbl-two-students that the blue student has a significant chance of failing the course and is unlikely to meet the provincial standard by finishing with a level 3 or higher. On the other hand, the orange student is almost guaranteed to meet the provincial standard.
+
+[^1_intro-1]: We'll use [Ontario's cut scores](https://www.edu.gov.on.ca/eng/policyfunding/growsuccess.pdf#page=46) given that I teach high school math in Ottawa.
+
+```{r}
+#| label: tbl-two-students
+#| tbl-cap: "Predicted Probabilities of Obtaining a Certain Grade Level"
+
+two_student_samples |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "student", values_to = "grade") |>
+  mutate(
+    p_levels = case_when(
+      grade < 0.50 ~ "R",
+      grade >= 0.50 & grade < 0.60 ~ "1",
+      grade >= 0.60 & grade < 0.70 ~ "2",
+      grade >= 0.70 & grade < 0.80 ~ "3",
+      grade >= 0.80  ~ "4",
+    ),
+    level = factor(p_levels, levels = c("R", "1", "2", "3", "4"))
+  ) |>
+  group_by(student, level) |>
+  summarise(
+    probability = n() / nrow(two_student_samples)
+    ) |>
+  ungroup() |>
+  pivot_wider(names_from = student, values_from = probability) |>
+  gt() |>
+  fmt_number(columns = where(is.numeric), decimals = 2) |>
+  cols_label(
+    level = "Grade",
+    blue = "Blue",
+    orange = "Orange"
+  ) |>
+  tab_style(
+    style = list(cell_fill(color = "#e74c3c")), # Red
+    locations = cells_body(rows = level == "R")
+  ) |>
+  tab_style(
+    style = cell_fill(color = "#f1c40f"), # Yellow
+    locations = cells_body(rows = 2:3)
+  ) |>
+  tab_style(
+    style = cell_fill(color = "#2ecc71"), # Green
+    locations = cells_body(rows = 4:5)
+  )
+```
+
+These kinds of statistics would be immensely helpful to teachers, who must constantly make decisions about how to allocate their limited time and attention. They would also benefit guidance counselors, who could more effectively support students in course selection and career planning. And perhaps most importantly, this information empowers students and their families to make **timely and informed decisions** about when and how to intervene. For example, imagine the blue student being shown @fig-two-students and @tbl-two-students in June when choosing courses for the next school year. This could spark the motivation to review key material over the summer, hire a tutor, or at least line one up in case additional support is needed. The student might feel a new sense of urgency to sit at the front of the class, stay engaged, complete their homework, and follow up when confused.
+
+This approach represents a paradigm shift in education — from reactive to proactive. Under the current model, the blue student selects their courses without being made aware of their risk profile. They live in what might be called “delusional land” until the first marks come in. Even then, early warning signs are often ignored: the student, the parents, and even the teacher may dismiss the low grades as flukes. By the time anyone takes meaningful action, it’s often mid-semester — much later than necessary. All of this could be avoided with a more data-informed, preventative approach.
+
+Critics sometimes raise concerns about statistical prediction models, citing the Golem effect — the idea that negative expectations from teachers can lower student performance. But such concerns are overstated. First, replications of Rosenthal’s original Golem and Pygmalion effects have been inconsistent at best.[^1_intro-2] More importantly, achievement gaps already exist under the current model. Pretending students are blank slates and ignoring their prior performance in the name of fairness is a well-intentioned recipe for inequity. The real ethical danger lies in doing nothing — in allowing predictable struggles to unfold without timely support.
+
+[^1_intro-2]: Jussim, L., & Harber, K. D. (2005). Teacher Expectations and Self-Fulfilling Prophecies: Knowns and Unknowns, Resolved and Unresolved Controversies. Personality and Social Psychology Review, 9(2), 131–155. https://doi.org/10.1207/s15327957pspr0902_3

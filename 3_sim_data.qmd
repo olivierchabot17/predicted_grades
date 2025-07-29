@@ -1,0 +1,850 @@
+---
+editor: visual
+execute:
+  warning: false
+---
+
+# Simulated Data
+
+A great way to start modeling data is to simulate artificial data that couldn't be distinguished from observed data.
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(GGally)
+library(patchwork)
+library(ggpmisc)
+
+# Set ggplot theme
+theme_set(theme_classic())
+
+to_percent <- function(x, digits = 2){
+  return(round(x * 100, digits = digits))
+}
+```
+
+## Simple Generative Model (DAG A)
+
+Given all our prior knowledge about the data-generating process of school grades, let's try to write down the model from @fig-dag-model-a both in math and then in code to simulate data.
+
+$$x_{8i} \sim \text{Beta}(0.8 \cdot 10, (1-0.8) \cdot 10)$$ $$\mu_{9i} = x_{8i} - 0.03$$ $$x_{9i} \sim N(\mu_{9i}, 0.02)$$ $$\mu_{10i} = x_{9i} - 0.05$$ $$y_{10i} \sim N(\mu_{10i}, 0.02)$$ There's a lot to unpack here. The first equation says that year 8 results follow a [Beta distribution](https://en.wikipedia.org/wiki/Beta_distribution#Mean_and_variance) with a mean $\mu$ of 80% and a precision parameter $\phi$ of 10. Let's visualize this distribution for different values of $\phi \in [10, 15, 20, 25, 30]$.
+
+```{r}
+#| label: fig-grade-8
+#| fig-cap: "Theoretical distribution of year 8 math results."
+ggplot() +
+  stat_function(fun=dbeta, args=list(shape1=0.8*10, shape2=(1-0.8)*10),
+                color = "darkorange") +
+  stat_function(fun=dbeta, args=list(shape1=0.8*15, shape2=(1-0.8)*15)) +
+  stat_function(fun=dbeta, args=list(shape1=0.8*20, shape2=(1-0.8)*20)) +
+  stat_function(fun=dbeta, args=list(shape1=0.8*25, shape2=(1-0.8)*25)) +
+  stat_function(fun=dbeta, args=list(shape1=0.8*30, shape2=(1-0.8)*30)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Theoretical Distribution of year 8 Math Results",
+    y = "Probability Density"
+  )
+```
+
+We see that the orange curve in @fig-grade-8 above with a precision parameter of 10 is a reasonable starting point. Very few students fail year 8 math.
+
+We can generate random numbers from this distribution using the R function `rbeta()`. The second equation simply shifts the year 8 results by 3% to reflect our knowledge that high school is typically more difficult. The third equation states that year 9 results are normally distributed with a mean that's three percent lower than their result in year 8 and a standard deviation of 2%. It acts as random noise and we know that [roughly 95%](https://en.wikipedia.org/wiki/68%E2%80%9395%E2%80%9399.7_rule) of the observations will be $\pm4$% of the mean. Note that we assume a 5% drop between year 9 and year 10 since year 10 is the first academic stream course.
+
+Let's simulate 250 observations using our mathematical model.
+
+```{r}
+set.seed(2025)
+
+N <- 250
+sim_grades <- tibble(
+  y8 = rbeta(n = N, shape1 = 0.8*10, shape2 = (1-0.8)*10),
+  mu9 = y8 - 0.03,
+  y9 = rnorm(n = N, mean = mu9, sd = 0.02),
+  mu10 = y9 - 0.05,
+  y10 = rnorm(n = N, mean = mu10, sd = 0.02)
+)
+```
+
+```{r}
+#| label: fig-sim-grades-linear
+#| fig-cap: "Overlapping densities of simulated data."
+sim_grades |>
+  pivot_longer(
+    cols = starts_with("y"),
+    names_to = "year", 
+    values_to = "grade"
+  ) |>
+  mutate(
+    year = factor(
+      year,
+      levels = c("y8", "y9", "y10"),
+      labels = c("year 8", "MTH1W", "MPM2D")
+      )) |>
+  ggplot(aes(x = grade, fill = year)) +
+  geom_density(alpha = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Simulated Grades",
+    y = "Probability Density"
+  )
+```
+
+```{r}
+#| label: fig-sim-pairs
+#| fig-cap: "Summary statistics of the simulated data."
+
+# Custom lower panel with regression line, equation, and styled points
+lower_fun <- function(data, mapping, ...) {
+  ggplot(data = data, mapping = mapping) +
+    geom_point(shape = 1, alpha = 0.4, size = 1.5) +
+    geom_smooth(method = "lm", formula = 'y ~ x', se = FALSE, color = "steelblue") +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+    stat_poly_eq(
+      formula = y ~ x,
+      aes(label = after_stat(eq.label)),
+      parse = TRUE,
+      size = 3
+    ) +
+    scale_x_continuous(labels = scales::percent, breaks = seq(-1,1, 0.25)) +
+    scale_y_continuous(labels = scales::percent, breaks = seq(-1,1, 0.250))
+}
+
+sim_grades |>
+  select(starts_with("y")) |>
+  ggpairs(lower = list(continuous = lower_fun))
+```
+
+```{r}
+sim_grades |>
+  summary()
+```
+
+The distributions in @fig-sim-grades-linear roughly match my experience. All of them are left skewed with few students failing. As expected, we see that the correlation between year 9 and year 10 is stronger than the one between year 8 and year 10. That said, both correlations are very strong so we can add a bit more noise to the process.
+
+The noise problem can easily be addressed but the fact that some grades are bigger than 100% is a fatal issue for this model. We'll see how we can address this problem in @sec-id. Let's change the standard deviations to 5% instead of 2% and see what we get.
+
+```{r}
+set.seed(2025)
+
+sim_grades <- tibble(
+  y8 = rbeta(n = N, shape1 = 0.8*10, shape2 = (1-0.8)*10),
+  mu9 = y8 - 0.03,
+  y9 = rnorm(n = N, mean = mu9, sd = 0.05),
+  mu10 = y9 - 0.05,
+  y10 = rnorm(n = N, mean = mu10, sd = 0.05)
+)
+
+sim_grades |>
+  pivot_longer(
+    cols = starts_with("y"),
+    names_to = "year", 
+    values_to = "grade"
+  ) |>
+  mutate(
+    year = factor(
+      year,
+      levels = c("y8", "y9", "y10"),
+      labels = c("year 8", "MTH1W", "MPM2D")
+      )) |>
+  ggplot(aes(x = grade, fill = year)) +
+  geom_density(alpha = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Simulated Grades",
+    y = "Probability Density"
+  )
+
+sim_grades |>
+  select(starts_with("y")) |>
+  ggpairs(lower = list(continuous = lower_fun))
+
+sim_grades |>
+  summary()
+```
+
+We see that our correlations are more realistic. However, more students in year 9 and 10 received grades over 100%. The top student in year 9 finished with 106% while the top student in year 10 finished with 109%! This is simply because, unlike the beta distribution, the normal distribution is not bounded between zero and one.
+
+## A More Complex Generative Model (DAG A) {#sec-id}
+
+Since we need data to be bounded, let's use a beta distribution to simulate the artificial data for all three grades.
+
+$$x_{8i} \sim \text{Beta}(0.8 \cdot \phi, \, (1 - 0.8) \cdot \phi))$$
+
+$$\mu_{9i} = x_{8i} - 0.03$$ $$x_{9i} \sim \text{Beta}(\mu_{9i} \cdot \phi, \, (1 - \mu_{9i}) \cdot \phi)$$ $$\mu_{10i} = x_{9i} - 0.05$$ $$y_{10i} \sim \text{Beta}(\mu_{10i} \cdot \phi, \, (1 - \mu_{10i}) \cdot \phi)$$
+
+Note that in model, year 10 results only depend on year 9 results which themselves depend on year 8 results. There's no direct link between year 8 and year 10 grades like in DAG A of @fig-dag-model-a.
+
+```{r}
+set.seed(2025)
+
+sim_grades <- tibble(
+  y8 = rbeta(n = N, shape1 = 0.8*10, shape2 = (1-0.8)*10),
+  mu9 = y8 - 0.03,
+  y9 = rbeta(n = N, shape1 = mu9*10, shape2 = (1-mu9)*10),
+  mu10 = y9 - 0.05,
+  y10 = rbeta(n = N, shape1 = mu10*10, shape2 = (1-mu10)*10)
+)
+
+sim_grades |>
+  pivot_longer(
+    cols = starts_with("y"),
+    names_to = "year", 
+    values_to = "grade"
+  ) |>
+  mutate(
+    year = factor(
+      year,
+      levels = c("y8", "y9", "y10"),
+      labels = c("year 8", "MTH1W", "MPM2D")
+      )) |>
+  ggplot(aes(x = grade, fill = year)) +
+  geom_density(alpha = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Simulated Grades",
+    y = "Probability Density"
+  )
+
+sim_grades |>
+  select(starts_with("y")) |>
+  ggpairs(lower = list(continuous = lower_fun))
+
+sim_grades |>
+  summary()
+```
+
+We've fixed the issue of students getting over 100%. The correlations are realistic. What doesn't match my prior knowledge is the shape of the distribution of grades. The peaks of the year 9 and 10 distributions are in the nineties which is even higher than for year 8 students. Ideally, the mode of the distributions would shift to the left with each subsequent year instead of stretching its left tail to achieve a lower mean.
+
+## Linear Link (DAG A)
+
+In the previous model, we simply subtracted 3% from the grade in year 8 result and 5% from the year 9 result. We can now add slope parameters to our model and center our predictors by subtracting the mean.
+
+$$x_{8i} \sim \text{Beta}(0.8 \cdot \phi, \, (1 - 0.8) \cdot \phi))$$
+
+$$\mu_{9i} = \alpha_9 + \beta_1 (x_{8i} - \bar{x}_8)$$ $$x_{9i} \sim \text{Beta}(\mu_{9i} \cdot \phi, \, (1 - \mu_{9i}) \cdot \phi)$$ $$\mu_{10i} = \alpha_{10} + \beta_2 (x_{9i} - \bar{x}_9)$$ {#eq-mediator-linear} $$y_{10i} \sim \text{Beta}(\mu_{10i} \cdot \phi, \, (1 - \mu_{10i}) \cdot \phi)$$ 
+
+Centering our predictors allows for more meaningful interpretation of the parameters. Let's consider the average student who finished with 80% in year 8. We get $\mu_{9i} = \alpha_9 + \beta_1 (0.8 - 0.8) = \alpha_9 + \beta_1 (0) = \alpha_9$. Therefore, the $\alpha$ parameters represent the average grade. With our assumption, $\alpha_9 = 77$% and $\alpha_{10} = 72$%. Of course, we don't know these averages precisely and could represent our prior beliefs with the following priors for the $\alpha$ parameters.
+
+```{r}
+#| label: fig-alpha-priors
+#| fig-cap: "Visualizing the priors for alpha."
+
+ggplot() +
+  stat_function(
+    fun = dnorm,
+    args = list(mean = 0.8, sd = 0.03),
+    xlim = c(0.5, 1)
+  ) +
+  stat_function(
+    fun = dnorm,
+    args = list(mean = 0.77, sd = 0.03),
+    xlim = c(0.5, 1)
+  ) +
+  stat_function(
+    fun = dnorm,
+    args = list(mean = 0.72, sd = 0.03),
+    xlim = c(0.5, 1)
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Alphas",
+    y = "Probability Density"
+  )
+```
+
+The $\beta$ parameters are the amount that expected the year 9 result increases for every 1 unit increase in the year 8 grade. Not that all our data is between zero and one so we may want to divide our slopes by ten or one hundred for interpretability.
+
+```{r}
+#| label: fig-beta-lin
+#| fig-cap: "Building an intuition for the slope parameters."
+
+ggplot() +
+  stat_function(fun = function(x) {0.77+0*(x-0.8)}, xlim = c(0, 1)) +
+  stat_function(fun = function(x) {0.77+0.1*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+0.2*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+0.3*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+0.4*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+0.5*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+0.6*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+0.7*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+0.8*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+0.9*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+1*(x-0.8)},
+                xlim = c(0,1), color = "darkorange") +
+  stat_function(fun = function(x) {0.77+1.1*(x-0.8)}, xlim = c(0,1)) +
+  stat_function(fun = function(x) {0.77+1.2*(x-0.8)}, xlim = c(0,1)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  geom_label(aes(x = 0.8, y = 0.85), label = "Average student") +
+  scale_x_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  labs(
+    x = "year 8 Grade",
+    y = "year 9 Grade"
+  )
+```
+
+@fig-beta-lin shows the equation $y_9 = 0.77 + \beta(x - 0.8)$ for $\beta \in [0, 0.1, 0.2, ..., 1.2]$. The orange line is where $\beta = 1$ and the dashed line is the equation $y=x$. We know intuitively that reasonable values of $\beta$ are going to be close to 1 so we could set our prior as $\beta \sim N(\mu = 1, \sigma = 0.2$ which can be visualized as in @fig-beta-prior-lin.
+
+```{r}
+#| label: fig-beta-prior-lin
+#| fig-cap: "Visualizing the prior for beta."
+
+ggplot() +
+  stat_function(
+    fun = dnorm,
+    args = list(mean = 1, sd = 0.2),
+    xlim = c(0, 2)
+  ) +
+  labs(
+    x = "Beta",
+    y = "Probability Density"
+  )
+```
+
+Repeating the same procedure for the slope coefficient between year 9 and year 10 we see that values slightly larger than one might make more sense here so we'll code it as 1.1 in the simulation.
+
+```{r}
+ggplot() +
+  stat_function(fun = function(x){0.72+0*(x-0.8)}, xlim = c(0, 1)) +
+  stat_function(fun = function(x){0.72+0.1*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+0.2*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+0.3*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+0.4*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+0.5*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+0.6*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+0.7*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+0.8*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+0.9*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+1*(x-0.77)},
+                xlim = c(0,1), color = "darkorange") +
+  stat_function(fun = function(x){0.72+1.1*(x-0.77)}, xlim = c(0,1)) +
+  stat_function(fun = function(x){0.72+1.2*(x-0.77)}, xlim = c(0,1)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  geom_label(aes(x = 0.8, y = 0.85), label = "Average student") +
+  scale_x_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  labs(
+    x = "year 9 Grade",
+    y = "year 10 Grade"
+  )
+```
+
+```{r}
+set.seed(2025)
+
+sim_grades <- tibble(
+  y8 = rbeta(n = N, shape1 = 0.8*10, shape2 = (1-0.8)*10),
+  mu9 = 0.77 + 0.9* (y8 - mean(y8)),
+  y9 = rbeta(n = N, shape1 = mu9*10, shape2 = (1-mu9)*10),
+  mu10 = 0.72 + 1 * (y9 - mean(y9)),
+  y10 = rbeta(n = N, shape1 = mu10*10, shape2 = (1-mu10)*10)
+)
+
+sim_grades |>
+  pivot_longer(
+    cols = starts_with("y"),
+    names_to = "year", 
+    values_to = "grade"
+  ) |>
+  mutate(
+    year = factor(
+      year,
+      levels = c("y8", "y9", "y10"),
+      labels = c("year 8", "MTH1W", "MPM2D")
+      )) |>
+  ggplot(aes(x = grade, fill = year)) +
+  geom_density(alpha = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Simulated Grades",
+    y = "Probability Density"
+  )
+
+sim_grades |>
+  select(starts_with("y")) |>
+  ggpairs(lower = list(continuous = lower_fun))
+
+sim_grades |>
+  summary()
+```
+
+## Linear Link (DAG B) {#sec-lin-dag-b}
+
+Let's add the term $\beta_3 \cdot (x_{9i} - \bar{x}_9)$ to @eq-mediator-linear to introduce a direct effect of year 8 and year 10 as depicted in @fig-dag-model-b.
+
+$$x_{8i} \sim \text{Beta}(0.8 \cdot \phi, \, (1 - 0.8) \cdot \phi))$$
+
+$$\mu_{9i} = \alpha_9 + \beta_1 \cdot (x_{8i} - \bar{x}_8)$$
+
+$$x_{9i} \sim \text{Beta}(\mu_{9i} \cdot \phi_9,\ (1 - \mu_{9i}) \cdot \phi_9)$$
+
+$$\mu_{10i} = \alpha_{10} + \beta_2 \cdot (x_{8i} - \bar{x}_8) + \beta_3 \cdot (x_{9i} - \bar{x}_9)$$
+
+$$y_{10i} \sim \text{Beta}(\mu_{10i} \cdot \phi_{10},\ (1 - \mu_{10i}) \cdot \phi_{10})$$ We see that $\mu_{10}$ now directly depends on both year 9 and year 8 results. We can also interpret the $\beta$ slope parameters as causal effects if we assume that DAG B is the true data-generating model. Here's how to interpret the coefficients :
+
+1.  The direct effect of year 8 on year 9 is $\beta_1$.
+2.  The direct effect of year 8 on year 10 is $\beta_2$.
+3.  The direct effect of year 9 on year 10 is $\beta_3$.
+4.  The indirect effect of year 8 on year 10 is $\beta_1 \times \beta_3$.
+5.  Total effect of year 8 on year 10 is $\beta_2 + \beta_1 \times \beta_3$.
+
+The difficult thing is to set reasonable priors for these $\beta$ parameters. We expect for example that grades are positively correlated and, hence, the slopes should be positive. We also expect the direct effect of year 8 on year 9, $\beta_1$, to be close to one. We expect the direct effect of year 8 on year 10 to be relatively small since the total of year 8 on year 10 to be mostly mediated by year 9.
+
+Let's consider a student who finished with 70% in year 8 and 67% in year 9. We expect this student to score around 62% in year 10. We can use the code below tho try out meta different values of $\beta_2$ and $\beta_3$ to see which range of parameters produce reasonable results.
+
+```{r}
+#| label: fig-plausible-betas
+#| fig-cap: "Visualizing plausible values for the slope parameters."
+
+# Constants
+mean_x8 <- 0.80
+mean_x9 <- 0.77
+alpha_10 <- 0.72
+
+beta_2 <- seq(0, 2, by = 0.01)
+beta_3 <- seq(0, 2, by = 0.01)
+
+# Define vector of x8 values
+x8_vals <- c(0.55, 0.6, 0.65, 0.7, 0.75, 0.85, 0.90, 0.95, 1)
+
+# Function to generate plot for a given x8
+generate_plot <- function(x8) {
+  x9 <- x8 - 0.03
+  x10_expected <- x9 - 0.05
+  
+  expand.grid(beta_2 = beta_2, beta_3 = beta_3) |>
+    mutate(
+      mu10 = alpha_10 + beta_2 * (x8 - mean_x8) + beta_3 * (x9 - mean_x9)
+    ) |>
+    filter(
+      mu10 >= x10_expected - 0.1,
+      mu10 <= x10_expected + 0.1,
+      beta_3 > beta_2
+    ) |>
+    ggplot(aes(x = beta_2, y = beta_3)) +
+    geom_tile(aes(fill = mu10)) +
+    geom_contour(aes(z = mu10), breaks = x10_expected + 0.02 * c(-1, 1), color = "red", linewidth = 1) +
+    geom_abline() +
+    scale_fill_viridis_c(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title = paste0("x8 = ", scales::percent(x8, accuracy = 1)),
+      x = expression(beta[2]),
+      y = expression(beta[3]),
+      fill = expression(mu[10])
+    )
+}
+
+# Combine all plots into a grid
+plots <- map(x8_vals, generate_plot)
+wrap_plots(plots, ncol = 3)
+```
+
+We did we skip 80% in @fig-plausible-betas? It's because 80% is the average of year 8 so we'd only output the expected grade in year 10 of 72%. The previous plot tells that plausible values for $\beta_2$ are between 0 and 0.5 and the ones for $\beta_3$ are between 0.5 and 1.5. Thus, could set the following priors for $\beta_2$ and $\beta_3$.
+
+-   $\beta_2 \sim N(\mu = 0.25, \sigma = 0.1$
+-   $\beta_3 \sim N(\mu = 1, \sigma = 0.3$
+
+```{r}
+ggplot() +
+  stat_function(
+    fun = dnorm,
+    args = list(mean = 0.25, sd = 0.1),
+    xlim = c(0, 2)
+  ) +
+  stat_function(
+    fun = dnorm,
+    args = list(mean = 1, sd = 0.3),
+    xlim = c(0, 2)
+  ) +
+  labs(
+    x = "Beta",
+    y = "Probability Density"
+  )
+```
+
+```{r}
+set.seed(2025)
+
+sim_grades <- tibble(
+  y8 = rbeta(n = N, shape1 = 0.8*10, shape2 = (1-0.8)*10),
+  mu9 = 0.77 + 0.9 * (y8 - mean(y8)),
+  y9 = rbeta(n = N, shape1 = mu9 * 10, shape2 = (1 - mu9) * 10),
+  mu10 = 0.72 + 0.2 * (y8 - mean(y8)) + 0.9 * (y9 - mean(y9)),
+  y10 = rbeta(n = N, shape1 = mu10 * 10, shape2 = (1 - mu10) * 10),
+)
+
+sim_grades |>
+  pivot_longer(
+    cols = starts_with("y"),
+    names_to = "year", 
+    values_to = "grade"
+  ) |>
+  mutate(
+    year = factor(
+      year,
+      levels = c("y8", "y9", "y10"),
+      labels = c("year 8", "MTH1W", "MPM2D")
+      )) |>
+  ggplot(aes(x = grade, fill = year)) +
+  geom_density(alpha = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Simulated Grades",
+    y = "Probability Density"
+  )
+
+sim_grades |>
+  select(starts_with("y")) |>
+  ggpairs(lower = list(continuous = lower_fun))
+
+sim_grades |>
+  summary()
+```
+
+The simulated data from this model produces realistic results which gives us more confidence of our choice of priors.
+
+## Logit Link (DAG A)
+
+Although it's unlikely, it's technically possible for the model above to generate errors. Consider a year 8 student who finishes the course with a 2%.
+
+$$\mu_{9i} = x_{8i} - 0.03 = 0.02 - 0.03 = -0.01$$
+
+The beta distribution can't accept negative mean values. For this reason, we'll use the logit (log odds) link function instead of subtracting 3% from the previous grade: $$\text{logit}(\mu_{9i}) = \ln\left({\frac{\mu_{9i}}{1-\mu_{9i}}}\right)= \alpha_9 + \beta_1 \cdot (x_{8i} - \bar{x}_8)$$ {#eq-log-odds}
+
+We can solve for $\mu_{9i}$ by exponentiating both sides of the equations :
+
+$$\mu_{9i} = \frac{e^{\alpha_9 + \beta_1 \cdot (x_{8i} - \bar{x}_8)}}{1+e^{\alpha_9 + \beta_1 \cdot (x_{8i} - \bar{x}_8)}} = \frac{1}{1+e^{-(\alpha_9 + \beta_1 \cdot (x_{8i} - \bar{x}_8))}}$$ Visualizing these inverse functions is a good way to develop our intuition.
+
+```{r}
+p_1 <- ggplot() +
+  stat_function(
+    fun = function(x){exp(x) / (1 + exp(x))}, # plogis(x)
+    xlim = c(-5, 5)
+  ) +
+  labs(
+    title = "Logistic Function (plogis)",
+    x = "log-odds scale",
+    y = "probability scale"
+  )
+
+p_2 <- ggplot() +
+  stat_function(
+    fun = function(x){log(x / (1 - x))}, #qlogis(x)
+    xlim = c(0, 1)
+  ) +
+  labs(
+    title = "Logit Function (qlogis)",
+    x = "probability scale",
+    y = "log-odds scale"
+  )
+
+p_1 + p_2
+```
+
+We see that no matter what you input in the logistic function $\mu(x) = \frac{e^x}{1+e^x}$ you'll get a number that is between zero and one. That is, the domain of $\mu(x)$ is $(-\infty, +\infty)$ and its range is $(0, 1)$. The input of $\mu(x)$ is $\alpha_9 + \beta_1 \cdot (x - \bar{x}_8)$ where $\alpha_9$ and $\beta_1$ are constant parameters and $x$ is the result in year 8 and $\bar{x}_8)$ is the average of the year 8 class which we assumed was 80%. Note that the logistic function in R is `plogis()` and the logit function is `qlogis()`. How are we suppose to assign reasonable values to $\alpha_9$ and $\beta_1$?
+
+Let's start with the $\alpha_9$ parameter and consider the average student in year 8 who finished with 80%.
+
+$$\mu_{9_{avg}} = \frac{e^{\alpha_9 + \beta_1 \cdot (0.8 - 0.8)}}{1+e^{\alpha_9 + \beta_1 \cdot (0.8 -0.8)}} = \frac{e^{\alpha_9 + \beta_1 \cdot 0}}{1+e^{\alpha_9 + \beta_1 \cdot 0}} = \frac{e^{\alpha_9}}{1+e^{\alpha_9}}$$
+
+```{r}
+qlogis(0.77)
+
+plogis(qlogis(0.77))
+plogis(1.21)
+```
+
+As we did in previous simulations, let's assume that the year 9 average is 3% lower than the year 8 average. Therefore, the average year 8 student would finish with a 77% plus-minus some noise. Solving for $\alpha_9$ we get:
+
+$$0.77 = \frac{e^{\alpha_9}}{1+e^{\alpha_9}}$$ $$0.77 \cdot (1+e^{\alpha_9}) = e^{\alpha_9}$$ $$0.77 + 0.77 \cdot e^{\alpha_9} = e^{\alpha_9}$$ $$0.77 = e^{\alpha_9} - 0.77 \cdot e^{\alpha_9}$$ $$0.77 = e^{\alpha_9} (1 - 0.77)$$ $$e^{\alpha_9} = \frac{0.77}{1 - 0.77}$$ $$\alpha_9 = \ln \left( \frac{0.77}{1 - 0.77} \right) \approx 1.21$$
+
+```{r}
+#| label: fig-alpha
+#| fig-cap: "Visualizing plausible values for alpha."
+
+ggplot() +
+  stat_function(
+    fun = plogis,
+    xlim = c(-5, 5)
+  ) +
+  geom_segment(
+    aes(
+      x = c(-5, -5), xend = c(qlogis(0.55), qlogis(0.89)),
+      y = c(0.55, 0.89), yend = c(0.55, 0.89)),
+    linetype = "dashed"
+    ) +
+  geom_segment(
+    aes(
+      x = c(qlogis(0.55), qlogis(0.89)), xend = c(qlogis(0.55), qlogis(0.89)),
+      y = c(0, 0), yend = c(0.55, 0.89)),
+    linetype = "dashed"
+    ) +
+  labs(
+    x = "Reasonable values for alpha",
+    y = "Average Grade"
+  )
+```
+
+Given that class average in Ontario tend to hover between 55% and 85%, @fig-alpha shows that the associated range for plausible alpha values would be between `r round(qlogis(0.55), 2)` and `r round(qlogis(0.85), 2)`.
+
+We can express our understanding of alpha with the following prior distribution.
+
+$$
+\alpha \sim N(\mu = 1.21, \sigma = 0.5)
+$$
+
+```{r}
+#| label: fig-alpha-prior
+#| fig-cap: "Visualizing the prior for alpha."
+
+ggplot() +
+  stat_function(
+    fun = dnorm,
+    args = list(mean = 1.21, sd = 0.5),
+    xlim = c(-1, 3)
+  ) +
+  geom_vline(
+    xintercept = c(qlogis(0.55), 1.21, qlogis(0.89)),
+    linetype = "dashed") +
+  labs(
+    x = "Alpha",
+    y = "Probability Density"
+  )
+```
+
+Now that we have $\alpha_9 \approx 1.21$, we need to find plausible values for $\beta_1$. By inspecting @eq-log-odds, we see that $\beta_1$ is the slope parameter for the log-odds. If $\beta_1 = 0$
+
+```{r}
+#| label: fig-beta
+#| fig-cap: "Visualizing plausible values for beta."
+
+ggplot() +
+  stat_function(fun = function(x) plogis(1.21+-1*(x - 0.8)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(1.21+0*(x - 0.8)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(1.21+1*(x - 0.8)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(1.21+2*(x - 0.8)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(1.21+3*(x - 0.8)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(1.21+4*(x - 0.8)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(1.21+5*(x - 0.8)),
+                xlim = c(0, 1), color = "darkorange") +
+  stat_function(fun = function(x) plogis(1.21+6*(x - 0.8)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(1.21+7*(x - 0.8)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(1.21+8*(x - 0.8)), xlim = c(0, 1)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  geom_label(aes(x = 0.8, y = 0.77), label = "Average student") +
+  scale_x_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  labs(
+    x = "year 8 Grade",
+    y = "year 9 Grade"
+  )
+```
+
+@fig-beta shows 10 different curves for $\mu_9 = \frac{1}{1+e^{-(1.21 + \beta_1 \cdot (x_{8i} - 0.8))}}$ where $\beta_1 \in [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8]$. The orange curve is for $\beta_1 = 5$. The point of intersection of all curves is the performance of the average student (80% in year 8 and 77% in year 9). $\beta_1 < 0$ implies that there is a negative relationship between the grades. This doesn't make sense. Kids who score high in year 8 tend to score high in year 9 even tho it make be a bit lower than their previous grade. As seen in @fig-beta, the most plausible values of $\beta_1$ are around 5. The dashed diagonal line represents the equation $y = x$ which indicates that students perform equally well in the following courses which tends to not be what we observe in the classroom.
+
+Given what we know about the data-generating process we can express our prior belief as follows:
+
+$$
+\beta \sim N(\mu = 5, \sigma = 1.5)
+$$
+
+```{r}
+#| label: fig-beta-prior
+#| fig-cap: "Visualizing the prior for beta."
+
+ggplot() +
+  stat_function(
+    fun = dnorm,
+    args = list(mean = 5, sd = 1.5),
+    xlim = c(0, 10)
+  ) +
+  labs(
+    x = "Beta",
+    y = "Probability Density"
+  )
+```
+
+It's technically not impossible for the slope to be negative in practice so we'll allow the possibility while limiting the prior probability mass assigned to that range of possibility.
+
+Let's now fully write the mathematical model represented in DAG A of @fig-dag-model-a.
+
+$$x_{8i} \sim \text{Beta}(0.8 \cdot \phi, \, (1 - 0.8) \cdot \phi))$$
+
+$$\text{logit}(\mu_{9i}) = \alpha_9 + \beta_1 \cdot (x_{8i} - \bar{x}_8)$$
+
+$$x_{9i} \sim \text{Beta}(\mu_{9i} \cdot \phi_9,\ (1 - \mu_{9i}) \cdot \phi_9)$$
+
+$$\text{logit}(\mu_{10i}) = \alpha_{10} + \beta_2 \cdot(x_{9i} - \bar{x}_9)$$ {#eq-mediator}
+
+$$y_{10i} \sim \text{Beta}(\mu_{10i} \cdot \phi_{10},\ (1 - \mu_{10i}) \cdot \phi_{10})$$ Note that there's no direct effect of year 8 on year 10. All of it's effect is mediated by the year 9 results. As discussed earlier, DAG B is likely a better model and we'll see how we can build it's corresponding model in @sec-dag-b.
+
+```{r}
+qlogis(0.72)
+```
+
+```{r}
+ggplot() +
+  stat_function(fun = function(x) plogis(0.94+-1*(x - 0.77)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(0.94+0*(x - 0.77)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(0.94+1*(x - 0.77)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(0.94+2*(x - 0.77)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(0.94+3*(x - 0.77)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(0.94+4*(x - 0.77)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(0.94+5*(x - 0.77)),
+                xlim = c(0, 1), color = "darkorange") +
+  stat_function(fun = function(x) plogis(0.94+6*(x - 0.77)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(0.94+7*(x - 0.77)), xlim = c(0, 1)) +
+  stat_function(fun = function(x) plogis(0.94+8*(x - 0.77)), xlim = c(0, 1)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  geom_label(aes(x = 0.77, y = 0.72), label = "Average student") +
+  scale_x_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.1)) +
+  labs(
+    x = "year 9 Grade",
+    y = "year 10 Grade"
+  )
+```
+
+```{r}
+set.seed(2025)
+
+sim_grades <- tibble(
+  y8 = rbeta(n = N, shape1 = 0.8*10, shape2 = (1-0.8)*10),
+  mu8 = plogis(1.21 + 5 * (y8 - mean(y8))),
+  y9 = rbeta(n = N, shape1 = mu8 * 10, shape2 = (1 - mu8) * 10),
+  mu9 = plogis(0.94 + 4 * (y9 - mean(y9))),
+  y10 = rbeta(n = N, shape1 = mu9 * 10, shape2 = (1 - mu9) * 10),
+)
+
+sim_grades |>
+  pivot_longer(
+    cols = starts_with("y"),
+    names_to = "year", 
+    values_to = "grade"
+  ) |>
+  mutate(
+    year = factor(
+      year,
+      levels = c("y8", "y9", "y10"),
+      labels = c("year 8", "MTH1W", "MPM2D")
+      )) |>
+  ggplot(aes(x = grade, fill = year)) +
+  geom_density(alpha = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Simulated Grades",
+    y = "Probability Density"
+  )
+
+sim_grades |>
+  select(starts_with("y")) |>
+  ggpairs(lower = list(continuous = lower_fun))
+
+sim_grades |>
+  summary()
+```
+
+We see that the summary statistics, the correlations and the distributions are sensible. The only thing missing is the direct influence of year 8 results on year 10 results. Let's fix this in the next section.
+
+## Logit Link (DAG B) {#sec-dag-b}
+
+Let's add the term $\beta_3 \cdot (x_{9i} - \bar{x}_9)$ to @eq-mediator to introduce a direct effect of year 8 and year 10 as depicted in @fig-dag-model-b.
+
+$$x_{8i} \sim \text{Beta}(0.8 \cdot \phi, \, (1 - 0.8) \cdot \phi))$$
+
+$$\text{logit}(\mu_{9i}) = \alpha_9 + \beta_1 \cdot (x_{8i} - \bar{x}_8)$$
+
+$$x_{9i} \sim \text{Beta}(\mu_{9i} \cdot \phi_9,\ (1 - \mu_{9i}) \cdot \phi_9)$$
+
+$$\text{logit}(\mu_{10i}) = \alpha_{10} + \beta_2 \cdot (x_{8i} - \bar{x}_8) + \beta_3 \cdot (x_{9i} - \bar{x}_9)$$
+
+$$y_{10i} \sim \text{Beta}(\mu_{10i} \cdot \phi_{10},\ (1 - \mu_{10i}) \cdot \phi_{10})$$ How to set reasonable values for $\beta_2$ and $\beta_3$?
+
+```{r}
+# Inputs
+x8 <- 0.71
+x9 <- 0.68
+mean_x8 <- 0.80
+mean_x9 <- 0.77
+alpha_10 <- 0.94
+
+beta_2 <- seq(0, 10, by = 0.5)
+beta_3 <- seq(0, 10, by = 0.5)
+
+# Generate grid of all combinations
+grid <- expand.grid(beta_2 = beta_2, beta_3 = beta_3)
+
+# Compute mu_10 on the logit and probability scale
+grid <- grid |>
+  mutate(
+    logit_mu10 = alpha_10 + beta_2 * (x8 - mean_x8) + beta_3 * (x9 - mean_x9),
+    mu10 = plogis(logit_mu10)  # inverse logit
+  )
+
+plausible_betas <- grid |>
+  filter(mu10 <= 0.68, mu10 >= 0.58, beta_3 > beta_2)
+
+# Plot with contour around the region mu10 ∈ [0.55, 0.70]
+ggplot(grid, aes(x = beta_2, y = beta_3, fill = mu10)) +
+  geom_tile() +
+  geom_contour(aes(z = mu10), breaks = c(0.58, 0.68), color = "white") +
+  geom_abline(color = "white") +
+  scale_fill_viridis_c(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = expression(paste("Prior Predictive: ", mu[10], " as a function of ", beta[2], " and ", beta[3])),
+    x = expression(beta[2]),
+    y = expression(beta[3]),
+    fill = expression(mu[10])
+  ) +
+  theme_minimal()
+
+summary(plausible_betas)
+```
+
+```{r}
+set.seed(2025)
+
+sim_grades <- tibble(
+  y8 = rbeta(n = N, shape1 = 0.8*10, shape2 = (1-0.8)*10),
+  mu9 = plogis(1.21 + 5 * (y8 - mean(y8))),
+  y9 = rbeta(n = N, shape1 = mu9 * 10, shape2 = (1 - mu9) * 10),
+  mu10 = plogis(0.94 + 1.2 * (y8 - mean(y8)) + 4.35 * (y9 - mean(y9))),
+  y10 = rbeta(n = N, shape1 = mu10 * 10, shape2 = (1 - mu10) * 10),
+)
+
+#write_csv(sim_grades, file = "sim_grades.csv")
+
+sim_grades |>
+  pivot_longer(
+    cols = starts_with("y"),
+    names_to = "year", 
+    values_to = "grade"
+  ) |>
+  mutate(
+    year = factor(
+      year,
+      levels = c("y8", "y9", "y10"),
+      labels = c("year 8", "MTH1W", "MPM2D")
+      )) |>
+  ggplot(aes(x = grade, fill = year)) +
+  geom_density(alpha = 0.2) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),labels = scales::percent) +
+  labs(
+    x = "Simulated Grades",
+    y = "Probability Density"
+  )
+
+sim_grades |>
+  select(starts_with("y")) |>
+  ggpairs(lower = list(continuous = lower_fun))
+
+sim_grades |>
+  summary()
+```

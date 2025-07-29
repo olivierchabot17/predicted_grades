@@ -1,0 +1,14 @@
+# Preface {.unnumbered}
+
+This is a Quarto book.
+
+To learn more about Quarto books visit <https://quarto.org/docs/books>.
+
+Potential chapters :
+1. Introduction
+2. Data-Generating Processes and DAGs
+3. Simulated Data
+4. Stan Model
+5. Hierarchical Models
+6. Missing Data
+7. Predicting Student Achievement

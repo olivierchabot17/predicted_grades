@@ -1,0 +1,98 @@
+---
+editor: visual
+execute:
+  warning: false
+---
+
+# Data-Generating Process
+
+It's a good idea to start the modeling process by drawing a directed acyclic graph (DAG). This forces us to think about the data-generating process. Consider trying to predict year 10 mathematics results by using the students' final grades in year 8 and year 9 math courses. Let's start by listing our assumptions and laying out our understanding of data in the K-12 context.
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(dagitty)
+library(ggdag)
+
+# Set ggplot theme
+theme_set(theme_classic())
+
+to_percent <- function(x, digits = 2){
+  return(round(x * 100, digits = digits))
+}
+```
+
+## Data Structure
+
+We know that the future can't causally influence the past. As a result, we can draw the following DAG using [Dagitty](https://www.dagitty.net/dags.html#):
+
+```{r}
+#| label: fig-dag-model-a
+#| fig-cap: "DAG for predicting MPM2D using MTH1W and year 8."
+
+# https://evalf21.classes.andrewheiss.com/example/dags/
+dag_1 <- dagitty('dag {
+bb="0,0,1,1"
+math_8 [exposure,pos="0.3,0.500"]
+mth1w [exposure,pos="0.500,0.500"]
+mpm2d [outcome,pos="0.700,0.500"]
+math_8 -> mth1w
+mth1w -> mpm2d
+}
+')
+
+ggdag_status(dag_1, node_size = 20) +
+  guides(color = "none") +  # Turn off legend
+  theme_dag()
+```
+
+Another thing we know about [Ontario courses](https://www.dcp.edu.gov.on.ca/en/math) is that students are only streamed in year 10. [MPM2D](https://www.dcp.edu.gov.on.ca/en/course-descriptions-and-prerequisites/mathematics) is part of the academic stream which involves more abstract math and is typically more challenging. From experience, students tend to do well in middle school, experience a slight drop in year 9 (MTH1W) and another drop in year 10 if they decide to pursue the academic route. We also know that few students fail math courses in Ontario. As a result, the distribution of grades tend not to be symmetric around the mean. Instead, they are skewed to the left similar to the orange student in @fig-two-students.
+
+Furthermore, we expect year 9 results to correlate more strongly to year 10 results than the ones from year 8 for a few reasons. First, year 8 is two years prior while year 9 is only a year ago. The extra year allows for more opportunities for students to change. Second, the concepts of the year 9 mathematics course align more closely to the concepts of year 10. A student who masters the concepts of year 9 is well prepared for year 10 but the same can't be said about year 8. Third, high schools operate between year 9 and grade 12 so the same math department and potentially the same teacher will teach both courses so it'd make sense that the grades are more reliable. It's possible, for instance, that the middle school math teachers have a different grading philosophy than high school teachers. We could model the effect of the teacher if we had a large data set by drawing the following DAG. 
+
+```{r}
+#| label: fig-dag-teacher
+#| fig-cap: "Hierarchical DAG with the effect of the teacher."
+
+# https://evalf21.classes.andrewheiss.com/example/dags/
+dag_2 <- dagitty('dag {
+bb="0,0,1,1"
+teacher [exposure,pos="0.5,0.750"]
+math_8 [exposure,pos="0.3,0.250"]
+mth1w [exposure,pos="0.500,0.250"]
+mpm2d [outcome,pos="0.700,0.250"]
+teacher -> math_8
+teacher -> mth1w
+teacher -> mpm2d
+math_8 -> mth1w
+mth1w -> mpm2d
+}
+')
+
+ggdag_status(dag_2, node_size = 20) +
+  guides(color = "none") +  # Turn off legend
+  theme_dag()
+```
+Let's ignore the teacher effect for now for simplicity. Notice that @fig-dag-model-a assumes that year 8 has no direct effect on year 10 results. This implies that knowing a student's year 8 final grade tells you nothing more than only knowing their final grade in year 9. In other words, the effect of year 8 on year 10 is fully mediated by year 9.
+
+```{r}
+#| label: fig-dag-model-b
+#| fig-cap: "Alternative model for predicting MPM2D using MTH1W and year 8."
+
+dag_3 <- dagitty('dag {
+bb="0,0,1,1"
+math_8 [exposure,pos="0.5,0.6"]
+mpm2d [outcome,pos="0.7,0.4"]
+mth1w [exposure,pos="0.3,0.4"]
+math_8 -> mth1w
+math_8 -> mpm2d
+mth1w -> mpm2d
+}
+')
+
+ggdag_status(dag_3, node_size = 20) +
+  guides(color = "none") +  # Turn off legend
+  theme_dag()
+```
+
+@fig-dag-model-b is better represents our understanding of the data-generating process. Every previous course causally influences future courses both directly and indirectly. Thus, we'll continue our modeling journey with this model.
